@@ -2,17 +2,13 @@ package main
 
 import (
 	_ "embed"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -20,7 +16,6 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"check-up/bash"
-	"check-up/jUnit"
 )
 
 // TODO Understand whether it is ok to use package variables for using in internal functions
@@ -28,7 +23,7 @@ var verbosity int = 0
 var workdir string = ""
 
 //go:embed case.yaml
-var yamlConfig string
+var yamlConfig []byte
 
 func print(msg string) {
 	if os.Getenv("TERM") == "" {
@@ -43,22 +38,22 @@ func print(msg string) {
 
 type ScenarioItem struct {
 	// YAML-Defined data
-	Name        string            `yaml:"name"`
-	Case        string            `yaml:"case"`
-	GlobalEnv   map[string]string `yaml:"global_env"`
-	Env         map[string]string `yaml:"env"`
-	Workdir     string            `yaml:"workdir"`
-	Description string            `yaml:"description"`
-	Script      string            `yaml:"script"`
-	Skip        bool              `yaml:"skip"`
-	Output      bool              `yaml:"output"`
-	SecretWord  string            `yaml:"secret_word"`
-	Weight      int               `yaml:"weight"`
-	Log         string            `yaml:"log"`
-	Fatal       bool              `yaml:"fatal"`
-	Debug       string            `yaml:"debug"`
-	Before      []string          `yaml:"before"`
-	After       []string          `yaml:"after"`
+	Name         string            `yaml:"name"`
+	Case         string            `yaml:"case"`
+	GlobalEnv    map[string]string `yaml:"global_env"`
+	Env          map[string]string `yaml:"env"`
+	Workdir      string            `yaml:"workdir"`
+	Description  string            `yaml:"description"`
+	Script       string            `yaml:"script"`
+	Skip         bool              `yaml:"skip"`
+	Output       bool              `yaml:"output"`
+	SecretPhrase string            `yaml:"secret_phrase"`
+	Weight       int               `yaml:"weight"`
+	Log          string            `yaml:"log"`
+	Fatal        bool              `yaml:"fatal"`
+	Debug        string            `yaml:"debug"`
+	Before       []string          `yaml:"before"`
+	After        []string          `yaml:"after"`
 
 	// Runtime data
 	Status   string
@@ -244,7 +239,7 @@ func (c *suitConfig) printTestStatus(id int, asId ...int) {
 		if j == id {
 			if testCase.CanShow() {
 				if testCase.IsSuccessful() {
-					print(fmt.Sprintf("\033[32m✓ %2d  %s, %s, answer: %s\033[0m", i, testCase.Case, testCase.Duration, testCase.SecretWord))
+					print(fmt.Sprintf("\033[32m✓ %2d  %s, %s, secret phrase: %s\033[0m", i, testCase.Case, testCase.Duration, testCase.SecretPhrase))
 				} else {
 					print(fmt.Sprintf("\033[31m✗ %2d  %s, %s\033[0m", i, testCase.Case, testCase.Duration))
 				}
@@ -308,17 +303,9 @@ func (c *suitConfig) exec(item int) {
 	}
 }
 
-func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
-	/*
-	yamlFile, err := ioutil.ReadFile(config)
+func (t *suitConfig) getConf(config []byte) *suitConfig {
+	err := yaml.Unmarshal(config, t)
 
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = yaml.Unmarshal(yamlFile, t)
-	*/
-	err := yaml.Unmarshal([]byte(config), t)
 	if err != nil {
 		// TODO don't use Fatal out of main function
 		log.Fatal(fmt.Sprintf("Cannot recognize configuration structure in %s file: ", config))
@@ -347,15 +334,8 @@ func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
 		}
 
 		if (*t).Cases[i].Case != "" {
-			if len(taskFilter) > 0 {
-				if strings.Contains((*t).Cases[i].Case, taskFilter[0]) {
-					(*t).Cases[i].canShow = true
-					(*t).Cases[i].canRun = true
-				}
-			} else {
-				(*t).Cases[i].canShow = true
-				(*t).Cases[i].canRun = true
-			}
+			(*t).Cases[i].canShow = true
+			(*t).Cases[i].canRun = true
 		}
 
 		if (*t).Cases[i].Name == "" {
@@ -371,148 +351,13 @@ func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
 	return t
 }
 
-func downloadRemoteConfiguration(tmpFile *os.File, URL string) error {
-	resp, err := http.Get(URL)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	_, err = io.Copy(tmpFile, resp.Body)
-	return err
-}
-
 func duration(start time.Time, finish time.Time) string {
 	return finish.Sub(start).Truncate(time.Millisecond).String()
 }
 
-type reportFile struct {
-	fileName string
-	format   string
-}
-
-func (r *reportFile) parse(d string) {
-	config := strings.Split(d, "=")
-	if len(config) > 1 {
-		(*r).fileName = config[1]
-		(*r).format = config[0]
-	}
-}
-
-var report reportFile
-
-func jUnitReportSave(reportFile string, c suitConfig) {
-	if reportFile != "" {
-
-		T := struct {
-			SuitName    string
-			TotalTests  int
-			FailedTests int
-			Tests       []ScenarioItem
-			TotalTime   string
-			TimeStamp   string
-			Verbosity   int
-		}{
-			SuitName:    c.Name,
-			TotalTests:  c.all,
-			FailedTests: c.failed,
-			Tests:       c.Cases,
-			TotalTime:   c.duration,
-			TimeStamp:   time.Now().Format("2006-01-02T15:04:05"),
-			Verbosity:   0,
-		}
-
-		funcMap := template.FuncMap{
-			"Quote": func(m string) string {
-				return strconv.Quote(m)
-			},
-		}
-
-		reportFile, err := os.Create(reportFile)
-		defer reportFile.Close()
-		if err != nil {
-			log.Println(err)
-			return
-		}
-
-		jut, _ := template.New("junit report").Funcs(funcMap).Parse(string(jUnit.JUnitTemplate))
-		jut.Execute(reportFile, T)
-	}
-}
-
-func jsonReportSave(reportFile string, c suitConfig) {
-
-	type TestData struct {
-		Name     string `json:"name"`
-		Status   bool   `json:"status"`
-		Duration string `json:"duration"`
-		Stdout   string `json:"stdout"`
-	}
-
-	type TestsSummary struct {
-		Success  int     `json:"success"`
-		Failed   int     `json:"failed"`
-		Rating   float64 `json:"rating"`
-		Duration string  `json:"duration"`
-	}
-
-	type JsonStructure struct {
-		TestName string       `json:"testName"`
-		Tests    []TestData   `json:"tests"`
-		Summary  TestsSummary `json:"summary"`
-	}
-
-	var jsonReportData JsonStructure
-	jsonReportData.TestName = c.Name
-	jsonReportData.Tests = []TestData{}
-
-	if c.getScenarioCount() > 0 {
-		for _, id := range c.getScenarioIds() {
-			if c.Cases[id].CanShow() {
-				t := TestData{
-					Name:     c.Cases[id].Case,
-					Status:   c.Cases[id].IsSuccessful(),
-					Duration: c.Cases[id].Duration,
-				}
-
-				if (verbosity > 1 && c.Cases[id].IsFailed()) || (verbosity > 2) {
-					t.Stdout = c.Cases[id].Stdout
-				}
-
-				jsonReportData.Tests = append(jsonReportData.Tests, t)
-			}
-		}
-	}
-
-	jsonReportData.Summary = TestsSummary{
-		Success:  c.successfull,
-		Failed:   c.failed,
-		Rating:   c.score,
-		Duration: c.duration,
-	}
-
-	reportJson, _ := json.MarshalIndent(jsonReportData, "", "  ")
-	ioutil.WriteFile(reportFile, reportJson, 0644)
-}
-
 func main() {
-	localConfig := flag.String("local-config", "", "A local configuration file")
-	remoteConfig := flag.String(
-		"remote-config",
-		"",
-		"Remote URL from which configuration file should be downloaded")
-
-	// TODO understand what it is
-	filter := flag.String("f", "", "Run tests by regexp match")
 	// TODO understand what it is
 	wdir := flag.String("working-directory", "", "Specify a working directory")
-
-	// TODO understand what it is
-	reportFlag := flag.String(
-		"output",
-		"",
-		"JSON or JUnit report file. "+
-			"Example: --output json=... or --output junit=...")
 
 	// TODO understand what it is
 	v1 := flag.Bool("v", false, "Verbosity (mode 1). Show description if it's set")
@@ -522,8 +367,6 @@ func main() {
 	v3 := flag.Bool("vvv", false, "Verbosity (mode 3). Show failed and successful outputs")
 
 	flag.Parse()
-
-	report.parse(*reportFlag)
 
 	// Set Log Level
 	// https://golang.org/pkg/log/#example_Logger
@@ -544,38 +387,9 @@ func main() {
 
 	workdir = *wdir
 
-	// TODO create it only if remote-config is set
-	tmpDir, err := ioutil.TempDir("/tmp", "checkup")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-	tmpFile, _ := ioutil.TempFile(tmpDir, "config.*")
-	tmpFileName := tmpFile.Name()
-
-	if *localConfig == "" && *remoteConfig == "" {
-		log.Fatal("Please specify --local-config or --remote-config")
-	}
-	if *localConfig != "" && *remoteConfig != "" {
-		log.Fatal("Please specify ether --local-config or --remote-config")
-	}
-
-	// TODO Error-handling for remote-config incorrect format
-	if len(regexp.MustCompile("^http(s)?:").FindStringSubmatch(*remoteConfig)) > 0 {
-		// TODO check if the function returns an error
-		err := downloadRemoteConfiguration(tmpFile, *remoteConfig)
-		if err != nil {
-			log.Fatal("Remote configuration file has not been downloaded.")
-		}
-		// TODO don't reuse localConfig
-		localConfig = &tmpFileName
-		log.Println("Temporary file:", tmpFile.Name())
-	}
-
 	var c suitConfig
 
-	//c.getConf(*localConfig, *filter)
-	c.getConf(yamlConfig, *filter)
+	c.getConf(yamlConfig)
 
 	c.printHeader()
 	if c.getScenarioCount() > 0 {
@@ -592,11 +406,4 @@ func main() {
 	}
 	c.signOff()
 	c.printSummary()
-
-	switch report.format {
-	case "junit":
-		jUnitReportSave(report.fileName, c)
-	case "json":
-		jsonReportSave(report.fileName, c)
-	}
 }
