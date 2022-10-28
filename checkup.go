@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,12 +19,16 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"./modules/bash"
-	"./modules/jUnit"
+	"check-up/bash"
+	"check-up/jUnit"
 )
 
+// TODO Understand whether it is ok to use package variables for using in internal functions
 var verbosity int = 0
 var workdir string = ""
+
+//go:embed case.yaml
+var yamlConfig string
 
 func print(msg string) {
 	if os.Getenv("TERM") == "" {
@@ -34,7 +39,6 @@ func print(msg string) {
 	} else {
 		log.Println(msg)
 	}
-
 }
 
 type ScenarioItem struct {
@@ -48,6 +52,7 @@ type ScenarioItem struct {
 	Script      string            `yaml:"script"`
 	Skip        bool              `yaml:"skip"`
 	Output      bool              `yaml:"output"`
+	SecretWord  string            `yaml:"secret_word"`
 	Weight      int               `yaml:"weight"`
 	Log         string            `yaml:"log"`
 	Fatal       bool              `yaml:"fatal"`
@@ -83,7 +88,7 @@ func (s *ScenarioItem) RunBash() ([]byte, error) {
 	var err error = nil
 
 	if s.Script != "" {
-		tmpDir, _ := ioutil.TempDir("/var/tmp", "._")
+		tmpDir, _ := ioutil.TempDir("/tmp/check-up", "._")
 		defer os.RemoveAll(tmpDir)
 
 		tmpFile, _ := ioutil.TempFile(tmpDir, "tmp.*")
@@ -239,7 +244,7 @@ func (c *suitConfig) printTestStatus(id int, asId ...int) {
 		if j == id {
 			if testCase.CanShow() {
 				if testCase.IsSuccessful() {
-					print(fmt.Sprintf("\033[32m✓ %2d  %s, %s\033[0m", i, testCase.Case, testCase.Duration))
+					print(fmt.Sprintf("\033[32m✓ %2d  %s, %s, answer: %s\033[0m", i, testCase.Case, testCase.Duration, testCase.SecretWord))
 				} else {
 					print(fmt.Sprintf("\033[31m✗ %2d  %s, %s\033[0m", i, testCase.Case, testCase.Duration))
 				}
@@ -304,6 +309,7 @@ func (c *suitConfig) exec(item int) {
 }
 
 func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
+	/*
 	yamlFile, err := ioutil.ReadFile(config)
 
 	if err != nil {
@@ -311,7 +317,10 @@ func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
 	}
 
 	err = yaml.Unmarshal(yamlFile, t)
+	*/
+	err := yaml.Unmarshal([]byte(config), t)
 	if err != nil {
+		// TODO don't use Fatal out of main function
 		log.Fatal(fmt.Sprintf("Cannot recognize configuration structure in %s file: ", config))
 	}
 
@@ -353,13 +362,6 @@ func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
 			(*t).Cases[i].canRun = true
 		}
 
-		// if (*t).Cases[i].Log != "" {
-		// 	logging := (*t).Cases[i].Log
-		// 	if logging == "True" || logging == "true" || logging == "Yes" || logging == "yes" {
-		// 		(*t).Cases[i].Log = "true"
-		// 	}
-		// }
-
 		if (*t).Cases[i].CanShow() {
 			if (*t).Cases[i].Weight == 0 {
 				(*t).Cases[i].Weight = 1
@@ -369,7 +371,7 @@ func (t *suitConfig) getConf(config string, taskFilter ...string) *suitConfig {
 	return t
 }
 
-func load(tmpFile *os.File, URL string) error {
+func downloadRemoteConfiguration(tmpFile *os.File, URL string) error {
 	resp, err := http.Get(URL)
 	if err != nil {
 		return err
@@ -494,32 +496,30 @@ func jsonReportSave(reportFile string, c suitConfig) {
 }
 
 func main() {
-	localConfig := flag.String("c", "", "Local config path")
-	remoteConfig := flag.String("C", "", "Remote config url")
+	localConfig := flag.String("local-config", "", "A local configuration file")
+	remoteConfig := flag.String(
+		"remote-config",
+		"",
+		"Remote URL from which configuration file should be downloaded")
 
+	// TODO understand what it is
 	filter := flag.String("f", "", "Run tests by regexp match")
-	wdir := flag.String("w", "", "Set working Dir")
+	// TODO understand what it is
+	wdir := flag.String("working-directory", "", "Specify a working directory")
 
-	// -o junit=...
-	// -o json=...
-	reportFlag := flag.String("o", "", "JSON or JUnit report file")
+	// TODO understand what it is
+	reportFlag := flag.String(
+		"output",
+		"",
+		"JSON or JUnit report file. "+
+			"Example: --output json=... or --output junit=...")
 
-	// -v1 show description if it's set
-	// -v2 show failed outputs
-	// -v3 show failed and successful outputs
-	v1 := flag.Bool("v1", false, "Verbosity Mode 1")
-	v2 := flag.Bool("v2", false, "Verbosity Mode 2")
-	v3 := flag.Bool("v3", false, "Verbosity Mode 2")
-
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "\nUsage: ./checkup [Options]\n\nOptions:\n")
-
-		flag.VisitAll(func(f *flag.Flag) {
-			fmt.Fprintf(os.Stderr, "   %-5s  %v\n", "-"+f.Name, f.Usage) // f.Name, f.Value
-		})
-
-		fmt.Fprintf(os.Stderr, "\nMore Deetails: https://github.com/sbeliakou/check-up/\n\n")
-	}
+	// TODO understand what it is
+	v1 := flag.Bool("v", false, "Verbosity (mode 1). Show description if it's set")
+	// TODO understand what it is
+	v2 := flag.Bool("vv", false, "Verbosity (mode 2). Show failed outputs")
+	// TODO understand what it is
+	v3 := flag.Bool("vvv", false, "Verbosity (mode 3). Show failed and successful outputs")
 
 	flag.Parse()
 
@@ -544,23 +544,38 @@ func main() {
 
 	workdir = *wdir
 
-	tmpDir, _ := ioutil.TempDir("/var/tmp", ".")
+	// TODO create it only if remote-config is set
+	tmpDir, err := ioutil.TempDir("/tmp", "checkup")
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer os.RemoveAll(tmpDir)
-	tmpFile, _ := ioutil.TempFile(tmpDir, "tmp.*")
+	tmpFile, _ := ioutil.TempFile(tmpDir, "config.*")
 	tmpFileName := tmpFile.Name()
 
 	if *localConfig == "" && *remoteConfig == "" {
-		log.Fatal("Please specify -c or -C")
+		log.Fatal("Please specify --local-config or --remote-config")
+	}
+	if *localConfig != "" && *remoteConfig != "" {
+		log.Fatal("Please specify ether --local-config or --remote-config")
 	}
 
+	// TODO Error-handling for remote-config incorrect format
 	if len(regexp.MustCompile("^http(s)?:").FindStringSubmatch(*remoteConfig)) > 0 {
-		load(tmpFile, *remoteConfig)
+		// TODO check if the function returns an error
+		err := downloadRemoteConfiguration(tmpFile, *remoteConfig)
+		if err != nil {
+			log.Fatal("Remote configuration file has not been downloaded.")
+		}
+		// TODO don't reuse localConfig
 		localConfig = &tmpFileName
-		log.Println("tmpFile:", tmpFile.Name())
+		log.Println("Temporary file:", tmpFile.Name())
 	}
 
 	var c suitConfig
-	c.getConf(*localConfig, *filter)
+
+	//c.getConf(*localConfig, *filter)
+	c.getConf(yamlConfig, *filter)
 
 	c.printHeader()
 	if c.getScenarioCount() > 0 {

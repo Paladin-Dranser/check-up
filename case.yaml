@@ -1,0 +1,7 @@
+name: Simple Test
+cases:
+- case: "Check if '/tmp/dir1' is not created"
+  output: true
+  secret_word: 'hello'
+  script: |
+    [ ! -d /tmp/dir1 ]
